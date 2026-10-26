@@ -1,4 +1,24 @@
-// API Response Types
+// Enums as const objects (erasableSyntaxOnly-friendly). The API sends enums as numbers.
+export const CustomerType = {
+  Retail: 0,
+  Wholesale: 1,
+} as const;
+export type CustomerType = (typeof CustomerType)[keyof typeof CustomerType];
+
+export const OrderStatus = {
+  Pending: 0,
+  Confirmed: 1,
+  Shipped: 2,
+  Cancelled: 3,
+} as const;
+export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+
+export const RuleScope = {
+  PerUnit: 0,
+  OrderTotal: 1,
+} as const;
+export type RuleScope = (typeof RuleScope)[keyof typeof RuleScope];
+
 export interface Product {
   id: number;
   name: string;
@@ -14,17 +34,6 @@ export interface Customer {
   customerType: CustomerType;
 }
 
-export interface Order {
-  id: number;
-  customerId: number;
-  customerName: string;
-  customerType: CustomerType;
-  createdAt: string;
-  totalAmount: number;
-  status: OrderStatus;
-  items: OrderItem[];
-}
-
 export interface OrderItem {
   productId: number;
   productName: string;
@@ -33,28 +42,27 @@ export interface OrderItem {
   totalPrice: number;
 }
 
-export interface QuoteRequest {
-  customerId: number;
-  items: QuoteItem[];
-}
-
-export interface QuoteItem {
-  productId: number;
-  quantity: number;
-}
-
-export interface Quote {
+export interface Order {
+  id: number;
   customerId: number;
   customerName: string;
   customerType: CustomerType;
-  generatedAt: string;
-  items: QuoteItemDetail[];
+  createdAt: string;
+  /** Sum of the line totals, before the order-level discount. */
   subtotal: number;
-  additionalDiscount: number;
-  total: number;
+  discountAmount: number;
+  discountDescription: string | null;
+  totalAmount: number;
+  status: OrderStatus;
+  items: OrderItem[];
 }
 
-export interface QuoteItemDetail {
+export interface OrderRequest {
+  customerId: number;
+  items: { productId: number; quantity: number }[];
+}
+
+export interface QuoteItem {
   productId: number;
   productName: string;
   quantity: number;
@@ -64,75 +72,65 @@ export interface QuoteItemDetail {
   lineTotal: number;
 }
 
-// Enums (const assertions for erasableSyntaxOnly compatibility)
-export const CustomerType = {
-  Retail: 0,
-  Wholesale: 1
-} as const;
-
-export type CustomerType = 0 | 1;
-
-export const OrderStatus = {
-  Pending: 0,
-  Confirmed: 1,
-  Shipped: 2,
-  Cancelled: 3
-} as const;
-
-export type OrderStatus = typeof OrderStatus[keyof typeof OrderStatus];
-
-// UI State Types
-export interface CartItem {
-  product: Product;
-  quantity: number;
-  discountedPrice: number;
-  discountAmount: number;
+export interface AppliedRule {
+  ruleId: number;
+  description: string;
+  discountPercentage: number;
+  scope: RuleScope;
+  amountSaved: number;
 }
 
-export interface CartState {
-  items: CartItem[];
-  customerId: number | null;
-  customerType: CustomerType | null;
-  subtotal: number;
-  totalDiscount: number;
-  total: number;
+export interface NextTier {
+  description: string;
+  discountPercentage: number;
+  minimumOrderAmount: number;
+  amountToUnlock: number;
 }
 
-export interface FilterState {
-  searchTerm: string;
-  priceRange: [number, number];
-  inStockOnly: boolean;
-  sortBy: 'name' | 'price-low' | 'price-high' | 'stock';
-}
-
-// API Response Types
-export interface ApiResponse<T> {
-  data?: T;
-  error?: string;
-  message?: string;
-}
-
-export interface ProductsResponse {
-  products: Product[];
-}
-
-export interface CustomersResponse {
-  customers: Customer[];
-}
-
-export interface PricingResponse {
+export interface Quote {
   customerId: number;
   customerName: string;
   customerType: CustomerType;
-  products: ProductPricing[];
+  generatedAt: string;
+  items: QuoteItem[];
+  listTotal: number;
+  unitDiscountTotal: number;
+  subtotal: number;
+  additionalDiscount: number;
+  additionalDiscountPercentage: number;
+  total: number;
+  totalSavings: number;
+  appliedRules: AppliedRule[];
+  nextTier: NextTier | null;
 }
 
-export interface ProductPricing {
+export interface PricingRule {
   id: number;
-  name: string;
-  description: string;
-  stock: number;
-  basePrice: number;
-  calculatedPrice: number;
   customerType: CustomerType;
+  discountPercentage: number;
+  minimumOrderAmount: number | null;
+  description: string;
+}
+
+export interface ProductPrice extends Product {
+  /** Unit price for the selected customer after the per-unit rule. */
+  calculatedPrice: number;
+}
+
+export interface SearchResponse {
+  query: string;
+  /** Set when the query had typos; results are for this corrected text. */
+  correctedQuery: string | null;
+  products: Product[];
+}
+
+export interface CartItem {
+  product: Product;
+  quantity: number;
+}
+
+export interface CartState {
+  customerId: number | null;
+  customerType: CustomerType | null;
+  items: CartItem[];
 }

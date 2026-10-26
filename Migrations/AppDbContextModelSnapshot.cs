@@ -97,6 +97,15 @@ namespace WholesaleRetailStore.Migrations
                     b.Property<int>("CustomerId")
                         .HasColumnType("int");
 
+                    b.Property<decimal>("DiscountAmount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("decimal(18,2)")
+                        .HasDefaultValue(0m);
+
+                    b.Property<string>("DiscountDescription")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
                     b.Property<int>("Status")
                         .HasColumnType("int");
 
@@ -185,7 +194,7 @@ namespace WholesaleRetailStore.Migrations
                         {
                             Id = 2,
                             CustomerType = 1,
-                            Description = "Volume discount - 15% off for orders over $500",
+                            Description = "Volume discount - 15% off for orders over R500",
                             DiscountPercentage = 15.0m,
                             IsActive = true,
                             MinimumOrderAmount = 500.0m

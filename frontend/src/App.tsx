@@ -1,260 +1,194 @@
-import { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
-import { Store, Package, FileText, ShoppingCart as ShoppingCartIcon } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { BrowserRouter as Router, NavLink, Route, Routes } from 'react-router-dom';
+import { FileText, Package, ShoppingCart as CartIcon, Sprout } from 'lucide-react';
 import HomePage from './components/HomePage';
 import ShoppingCart from './components/ShoppingCart';
 import OrderHistory from './components/OrderHistory';
-import type { CartState, Customer, CartItem } from './types';
-import { ApiService } from './services/api';
-import './App.css';
+import type { CartState, Customer, Product, Quote } from './types';
+import { ApiService, errorMessage } from './services/api';
+
+const EMPTY_CART: CartState = { customerId: null, customerType: null, items: [] };
+
+const navClass = ({ isActive }: { isActive: boolean }) =>
+  `flex items-center gap-2 rounded-lg px-3 py-2 transition-colors ${
+    isActive ? 'bg-cream text-bark' : 'text-cream hover:bg-moss'
+  }`;
 
 function App() {
-  // Set document title
-  document.title = "Wholesale Retail Store";
-  const [cart, setCart] = useState<CartState>({
-    items: [],
-    customerId: null,
-    customerType: null,
-    subtotal: 0,
-    totalDiscount: 0,
-    total: 0,
-  });
-
+  const [cart, setCart] = useState<CartState>(EMPTY_CART);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [orderCount, setOrderCount] = useState(0);
 
-  useEffect(() => {
-    loadCustomers();
-    loadOrderCount();
-  }, []);
+  // The server is the single source of truth for prices: whenever the customer or the basket
+  // changes we ask for a fresh quote instead of adding up prices in the browser.
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
 
-  const loadOrderCount = async () => {
+  const loadCustomers = useCallback(async () => {
     try {
-      const orders = await ApiService.getOrders();
-      setOrderCount(orders.length);
-    } catch (error) {
-      console.error('Failed to load order count:', error);
-    }
-  };
-
-  const loadCustomers = async () => {
-    try {
-      const customerData = await ApiService.getCustomers();
-      setCustomers(customerData);
+      setCustomers(await ApiService.getCustomers());
     } catch (error) {
       console.error('Failed to load customers:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-
-
-  const handleCustomerSelect = (customer: Customer) => {
-    setCart(prev => ({
-      ...prev,
-      customerId: customer.id,
-      customerType: customer.customerType,
-      // Recalculate prices when customer changes
-      items: prev.items.map(item => {
-        // This would need to recalculate prices based on new customer type
-        // For now, we'll keep the same prices
-        return item;
-      })
-    }));
-  };
-
-  const addToCart = async (productId: number, quantity: number) => {
-    if (!cart.customerId || cart.customerType === null || cart.customerType === undefined) return;
-
+  const loadOrderCount = useCallback(async () => {
     try {
-      // Get product details and calculate pricing
-      const products = await ApiService.getProducts();
-      const product = products.find(p => p.id === productId);
-      if (!product) return;
-
-      const pricingResponse = await ApiService.getProductPrices(cart.customerId);
-      const productPricing = pricingResponse.products.find((p: any) => p.id === productId);
-
-      const discountedPrice = productPricing?.calculatedPrice || product.basePrice;
-      const discountAmount = product.basePrice - discountedPrice;
-
-      const newItem: CartItem = {
-        product,
-        quantity,
-        discountedPrice,
-        discountAmount,
-      };
-
-      setCart(prev => ({
-        ...prev,
-        items: [...prev.items.filter(item => item.product.id !== productId), newItem],
-        subtotal: prev.subtotal + (discountedPrice * quantity),
-        totalDiscount: prev.totalDiscount + (discountAmount * quantity),
-        total: prev.total + (discountedPrice * quantity),
-      }));
+      setOrderCount((await ApiService.getOrders()).length);
     } catch (error) {
-      console.error('Failed to add item to cart:', error);
-      alert('Failed to add item to cart. Please try again.');
+      console.error('Failed to load order count:', error);
     }
-  };
+  }, []);
 
-  const updateCartItem = (productId: number, quantity: number) => {
-    if (quantity === 0) {
-      removeFromCart(productId);
+  useEffect(() => {
+    loadCustomers();
+    loadOrderCount();
+  }, [loadCustomers, loadOrderCount]);
+
+  useEffect(() => {
+    if (cart.customerId === null || cart.items.length === 0) {
+      setQuote(null);
+      setQuoteError(null);
+      setQuoteLoading(false);
       return;
     }
 
+    let stale = false;
+    setQuoteLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await ApiService.generateQuote({
+          customerId: cart.customerId!,
+          items: cart.items.map(i => ({ productId: i.product.id, quantity: i.quantity })),
+        });
+        if (!stale) {
+          setQuote(result);
+          setQuoteError(null);
+        }
+      } catch (error) {
+        if (!stale) {
+          setQuote(null);
+          setQuoteError(errorMessage(error, 'Could not price your cart.'));
+        }
+      } finally {
+        if (!stale) setQuoteLoading(false);
+      }
+    }, 150);
+
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [cart.customerId, cart.items]);
+
+  const selectCustomer = (customer: Customer) => {
+    // The basket stays; the effect above re-prices it for the new customer type.
+    setCart(prev => ({ ...prev, customerId: customer.id, customerType: customer.customerType }));
+  };
+
+  const setQuantity = (product: Product, quantity: number) => {
+    const clamped = Math.min(Math.max(0, Math.floor(quantity) || 0), product.stock);
     setCart(prev => {
-      const item = prev.items.find(item => item.product.id === productId);
-      if (!item) return prev;
-
-      const quantityDiff = quantity - item.quantity;
-      const priceDiff = item.discountedPrice * quantityDiff;
-      const discountDiff = item.discountAmount * quantityDiff;
-
-      return {
-        ...prev,
-        items: prev.items.map(cartItem =>
-          cartItem.product.id === productId
-            ? { ...cartItem, quantity }
-            : cartItem
-        ),
-        subtotal: prev.subtotal + priceDiff,
-        totalDiscount: prev.totalDiscount + discountDiff,
-        total: prev.total + priceDiff,
-      };
+      const others = prev.items.filter(i => i.product.id !== product.id);
+      return { ...prev, items: clamped === 0 ? others : [...others, { product, quantity: clamped }] };
     });
   };
 
-  const removeFromCart = (productId: number) => {
-    setCart(prev => {
-      const item = prev.items.find(item => item.product.id === productId);
-      if (!item) return prev;
+  const clearCart = () => setCart(prev => ({ ...prev, items: [] }));
 
-      const itemTotal = item.discountedPrice * item.quantity;
-      const itemDiscount = item.discountAmount * item.quantity;
-
-      return {
-        ...prev,
-        items: prev.items.filter(item => item.product.id !== productId),
-        subtotal: prev.subtotal - itemTotal,
-        totalDiscount: prev.totalDiscount - itemDiscount,
-        total: prev.total - itemTotal,
-      };
-    });
-  };
-
-  const clearCart = () => {
-    setCart({
-      items: [],
-      customerId: null,
-      customerType: null,
-      subtotal: 0,
-      totalDiscount: 0,
-      total: 0,
-    });
-    // Refresh order count after clearing cart (usually after creating an order)
+  const handleOrderPlaced = () => {
+    clearCart();
     loadOrderCount();
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600"></div>
+      <div className="flex min-h-screen items-center justify-center bg-cream" role="status" aria-label="Loading">
+        <div className="h-12 w-12 animate-spin rounded-full border-4 border-mist border-t-moss" />
       </div>
     );
   }
 
+  const cartLines = cart.items.length;
+
   return (
     <Router>
-      <div className="min-h-screen bg-gray-50">
-        {/* Header */}
-        <header className="bg-white shadow-sm border-b">
-          <div className="px-4 py-4">
-            <div className="flex items-center justify-between">
-              {/* Left: Store Brand */}
-              <div className="flex items-center space-x-3">
-                <div className="bg-blue-500 text-white p-2 rounded-lg">
-                  <Store className="h-6 w-6" />
-                </div>
-                <div>
-                  <h1 className="text-xl font-bold text-gray-900">Wholesale Retail Store</h1>
-                  <p className="text-sm text-gray-600">Professional B2B Commerce Platform</p>
-                </div>
+      <div className="min-h-screen bg-cream">
+        <header className="bg-bark text-cream shadow">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-ochre p-2 text-bark">
+                <Sprout className="h-6 w-6" aria-hidden />
               </div>
-              
-              {/* Right: Navigation */}
-              <nav className="flex items-center space-x-6">
-                <Link 
-                  to="/" 
-                  className="flex items-center space-x-2 px-3 py-2 text-gray-700 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                >
-                  <Package className="h-4 w-4" />
-                  <span>Products</span>
-                </Link>
-                <Link 
-                  to="/cart" 
-                  className="flex items-center space-x-2 px-3 py-2 text-gray-700 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                >
-                  <ShoppingCartIcon className="h-4 w-4" />
-                  <span>Cart</span>
-                  {cart.items.length > 0 && (
-                    <span className="bg-blue-500 text-white text-xs rounded-full px-2 py-1 min-w-[20px] text-center">
-                      {cart.items.length}
-                    </span>
-                  )}
-                </Link>
-                <Link 
-                  to="/orders" 
-                  className="flex items-center space-x-2 px-3 py-2 text-gray-700 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                >
-                  <FileText className="h-4 w-4" />
-                  <span>Orders</span>
-                  {orderCount > 0 && (
-                    <span className="bg-blue-500 text-white text-xs rounded-full px-2 py-1 min-w-[20px] text-center">
-                      {orderCount}
-                    </span>
-                  )}
-                </Link>
-              </nav>
+              <div>
+                <h1 className="text-xl font-bold leading-tight">Wholesale Retail Store</h1>
+                <p className="text-sm text-sage">Fair prices for every kind of customer</p>
+              </div>
             </div>
+
+            <nav className="flex items-center gap-1" aria-label="Main">
+              <NavLink to="/" end className={navClass}>
+                <Package className="h-4 w-4" aria-hidden />
+                <span>Products</span>
+              </NavLink>
+              <NavLink to="/cart" className={navClass}>
+                <CartIcon className="h-4 w-4" aria-hidden />
+                <span>Cart</span>
+                {cartLines > 0 && (
+                  <span className="min-w-5 rounded-full bg-ochre px-1.5 text-center text-xs font-semibold text-bark">
+                    {cartLines}
+                  </span>
+                )}
+              </NavLink>
+              <NavLink to="/orders" className={navClass}>
+                <FileText className="h-4 w-4" aria-hidden />
+                <span>Orders</span>
+                {orderCount > 0 && (
+                  <span className="min-w-5 rounded-full bg-sage px-1.5 text-center text-xs font-semibold text-bark">
+                    {orderCount}
+                  </span>
+                )}
+              </NavLink>
+            </nav>
           </div>
         </header>
 
-        {/* Main Content */}
-        <main className="px-4 py-4">
+        <main className="mx-auto max-w-7xl px-4 py-6">
           <Routes>
-            <Route 
-              path="/" 
+            <Route
+              path="/"
               element={
-                <HomePage 
+                <HomePage
                   customers={customers}
-                  selectedCustomerId={cart.customerId}
-                  onCustomerSelect={handleCustomerSelect}
-                  onCustomerCreate={loadCustomers}
                   customerId={cart.customerId}
                   customerType={cart.customerType}
                   cartItems={cart.items}
-                  onAddToCart={addToCart}
-                  onUpdateCart={updateCartItem}
-                  onRemoveFromCart={removeFromCart}
+                  onCustomerSelect={selectCustomer}
+                  onCustomerCreated={loadCustomers}
+                  onSetQuantity={setQuantity}
                 />
-              } 
+              }
             />
-            <Route 
-              path="/cart" 
+            <Route
+              path="/cart"
               element={
                 <ShoppingCart
                   cart={cart}
-                  onUpdateCart={updateCartItem}
-                  onRemoveFromCart={removeFromCart}
+                  customer={customers.find(c => c.id === cart.customerId) ?? null}
+                  quote={quote}
+                  quoteError={quoteError}
+                  quoteLoading={quoteLoading}
+                  onSetQuantity={setQuantity}
                   onClearCart={clearCart}
+                  onOrderPlaced={handleOrderPlaced}
                 />
-              } 
+              }
             />
-            <Route path="/orders" element={<OrderHistory onOrderCountChange={loadOrderCount} />} />
+            <Route path="/orders" element={<OrderHistory onOrdersLoaded={setOrderCount} />} />
           </Routes>
         </main>
       </div>

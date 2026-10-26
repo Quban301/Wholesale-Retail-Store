@@ -1,54 +1,24 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using WholesaleRetailStore.Data;
-using WholesaleRetailStore.Models;
 using WholesaleRetailStore.Services;
 
 namespace WholesaleRetailStore.Controllers
 {
     /// <summary>
-    /// Controller for managing products in the wholesale/retail store system.
-    /// Provides both MVC views and REST API endpoints for product catalog.
+    /// REST API for the product catalogue.
     /// </summary>
-    public class ProductsController : Controller
+    [ApiController]
+    public class ProductsController : ControllerBase
     {
         private readonly AppDbContext _context;
-        private readonly PricingService _pricingService;
-        private readonly ILogger<ProductsController> _logger;
+        private readonly ProductSearchService _search;
 
-        public ProductsController(AppDbContext context, PricingService pricingService, ILogger<ProductsController> logger)
+        public ProductsController(AppDbContext context, ProductSearchService search)
         {
             _context = context;
-            _pricingService = pricingService;
-            _logger = logger;
+            _search = search;
         }
-
-        /// <summary>
-        /// Displays the product catalog with pricing information
-        /// </summary>
-        public async Task<IActionResult> Index()
-        {
-            var products = await _context.Products.ToListAsync();
-            ViewBag.PricingService = _pricingService;
-            return View(products);
-        }
-
-        /// <summary>
-        /// Displays product details with pricing breakdown
-        /// </summary>
-        public async Task<IActionResult> Details(int id)
-        {
-            var product = await _context.Products.FindAsync(id);
-            if (product == null)
-            {
-                return NotFound();
-            }
-
-            ViewBag.PricingService = _pricingService;
-            return View(product);
-        }
-
-        // API Endpoints
 
         /// <summary>
         /// GET: api/products
@@ -58,52 +28,62 @@ namespace WholesaleRetailStore.Controllers
         public async Task<IActionResult> GetProducts()
         {
             var products = await _context.Products
-                .Select(p => new
-                {
-                    p.Id,
-                    p.Name,
-                    p.Description,
-                    p.Stock,
-                    p.BasePrice
-                })
+                .AsNoTracking()
+                .OrderBy(p => p.Name)
+                .Select(p => new { p.Id, p.Name, p.Description, p.Stock, p.BasePrice })
                 .ToListAsync();
 
             return Ok(products);
         }
 
         /// <summary>
+        /// GET: api/products/search?q=mlk
+        /// Typo-tolerant search. If the query had typos the response carries the corrected query
+        /// ("did you mean") and the results are for the corrected words. Pass autoCorrect=false
+        /// to search for exactly what was typed.
+        /// </summary>
+        /// <param name="q">What the user typed.</param>
+        /// <param name="autoCorrect">Fix typos before searching (default true).</param>
+        [HttpGet("api/products/search")]
+        public async Task<IActionResult> SearchProducts([FromQuery] string? q, [FromQuery] bool autoCorrect = true)
+        {
+            // The catalogue is small, so it is searched in memory. For a large catalogue this
+            // would become a SQL pre-filter plus ranking.
+            var products = await _context.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
+            var result = _search.Search(products, q, autoCorrect);
+
+            return Ok(new
+            {
+                result.Query,
+                result.CorrectedQuery,
+                Products = result.Products.Select(p => new { p.Id, p.Name, p.Description, p.Stock, p.BasePrice })
+            });
+        }
+
+        /// <summary>
         /// GET: api/products/{id}
         /// Returns a specific product by ID
         /// </summary>
-        [HttpGet("api/products/{id}")]
+        [HttpGet("api/products/{id:int}")]
         public async Task<IActionResult> GetProduct(int id)
         {
-            var product = await _context.Products.FindAsync(id);
-
+            var product = await _context.Products.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id);
             if (product == null)
             {
                 return NotFound(new { message = "Product not found" });
             }
 
-            return Ok(new
-            {
-                product.Id,
-                product.Name,
-                product.Description,
-                product.Stock,
-                product.BasePrice
-            });
+            return Ok(new { product.Id, product.Name, product.Description, product.Stock, product.BasePrice });
         }
 
         /// <summary>
         /// GET: api/products/stock/{id}
         /// Returns stock information for a specific product
         /// </summary>
-        [HttpGet("api/products/stock/{id}")]
+        [HttpGet("api/products/stock/{id:int}")]
         public async Task<IActionResult> GetProductStock(int id)
         {
-            var product = await _context.Products.FindAsync(id);
-
+            var product = await _context.Products.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id);
             if (product == null)
             {
                 return NotFound(new { message = "Product not found" });
@@ -113,10 +93,10 @@ namespace WholesaleRetailStore.Controllers
             {
                 ProductId = product.Id,
                 ProductName = product.Name,
-                Stock = product.Stock,
+                product.Stock,
                 IsAvailable = product.Stock > 0,
                 StockStatus = product.Stock > 10 ? "In Stock" :
-                             product.Stock > 0 ? "Low Stock" : "Out of Stock"
+                              product.Stock > 0 ? "Low Stock" : "Out of Stock"
             });
         }
     }

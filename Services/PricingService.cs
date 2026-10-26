@@ -1,12 +1,21 @@
+using Microsoft.EntityFrameworkCore;
 using WholesaleRetailStore.Data;
 using WholesaleRetailStore.Models;
 
 namespace WholesaleRetailStore.Services
 {
     /// <summary>
-    /// Service for handling pricing calculations and business rules.
-    /// Automatically applies discounts based on customer type and pricing rules.
+    /// Calculates prices and quotes from the active <see cref="PricingRule"/>s.
     /// </summary>
+    /// <remarks>
+    /// Rules are matched on customer type and split by whether they have a minimum order amount:
+    /// <list type="bullet">
+    /// <item><description>No minimum: a per-unit discount. The best (highest) one reduces every unit price.</description></item>
+    /// <item><description>With a minimum: a volume discount. Once the subtotal reaches the minimum, the best
+    /// qualifying one is taken off the subtotal.</description></item>
+    /// </list>
+    /// The two stack by design, so a wholesale order over the threshold gets both.
+    /// </remarks>
     public class PricingService
     {
         private readonly AppDbContext _context;
@@ -17,240 +26,184 @@ namespace WholesaleRetailStore.Services
         }
 
         /// <summary>
-        /// Calculates the discounted price for a product based on customer type.
-        /// Applies the best available pricing rule for the customer type.
+        /// Gets the active rules for a customer type.
         /// </summary>
-        /// <param name="product">The product to calculate price for</param>
-        /// <param name="customerType">The type of customer (Retail or Wholesale)</param>
-        /// <param name="quantity">Quantity being purchased (for future extensibility)</param>
-        /// <returns>The calculated price after applying discounts</returns>
-        public decimal CalculatePrice(Product product, CustomerType customerType, int quantity = 1)
+        public async Task<List<PricingRule>> GetActiveRulesAsync(CustomerType customerType, CancellationToken ct = default)
         {
-            // For retail customers, return base price (no discount)
-            if (customerType == CustomerType.Retail)
-            {
-                return product.BasePrice;
-            }
-
-            // For wholesale customers, find and apply the best pricing rule
-            var pricingRule = GetBestPricingRule(customerType, product.BasePrice * quantity);
-
-            if (pricingRule != null)
-            {
-                // Apply discount: BasePrice * (1 - DiscountPercentage/100)
-                return product.BasePrice * pricingRule.DiscountFactor;
-            }
-
-            // If no pricing rule found, return base price
-            return product.BasePrice;
+            return await _context.PricingRules
+                .AsNoTracking()
+                .Where(r => r.IsActive && r.CustomerType == customerType)
+                .ToListAsync(ct);
         }
 
         /// <summary>
-        /// Generates a quote for multiple products for a specific customer.
-        /// Returns detailed pricing breakdown including discounts applied.
+        /// Gets the unit price a customer type pays for one product, after the per-unit rule only
+        /// (volume discounts depend on the whole order, so they are not part of a unit price).
         /// </summary>
-        /// <param name="customer">The customer requesting the quote</param>
-        /// <param name="productQuantities">Dictionary of product IDs and quantities</param>
-        /// <returns>Detailed quote with pricing breakdown</returns>
-        public Quote GenerateQuote(Customer customer, Dictionary<int, int> productQuantities)
+        public static decimal CalculateUnitPrice(Product product, IReadOnlyList<PricingRule> rules)
+        {
+            return ApplyUnitDiscount(product.BasePrice, BestUnitRule(rules));
+        }
+
+        /// <summary>
+        /// Builds a quote for a customer. Duplicate product lines are merged and every line is
+        /// checked for existence, a positive quantity and sufficient stock.
+        /// </summary>
+        /// <exception cref="OrderValidationException">A product is unknown, a quantity is not positive, or stock is short.</exception>
+        public async Task<Quote> GenerateQuoteAsync(Customer customer, IEnumerable<OrderLine> requested, CancellationToken ct = default)
+        {
+            var lines = MergeLines(requested);
+            var ids = lines.Select(l => l.ProductId).ToList();
+
+            // One query for the whole basket rather than one per line.
+            var products = await _context.Products
+                .AsNoTracking()
+                .Where(p => ids.Contains(p.Id))
+                .ToDictionaryAsync(p => p.Id, ct);
+
+            var priced = new List<(Product Product, int Quantity)>();
+            foreach (var line in lines)
+            {
+                if (!products.TryGetValue(line.ProductId, out var product))
+                {
+                    throw new OrderValidationException($"Product {line.ProductId} was not found.", isNotFound: true);
+                }
+
+                if (product.Stock < line.Quantity)
+                {
+                    throw new OrderValidationException(
+                        $"Insufficient stock for {product.Name} (requested {line.Quantity}, available {product.Stock}).");
+                }
+
+                priced.Add((product, line.Quantity));
+            }
+
+            var rules = await GetActiveRulesAsync(customer.CustomerType, ct);
+            return BuildQuote(customer, priced, rules);
+        }
+
+        /// <summary>
+        /// Pure pricing calculation: no database access, so it is easy to unit test.
+        /// </summary>
+        public static Quote BuildQuote(Customer customer, IReadOnlyList<(Product Product, int Quantity)> lines, IReadOnlyList<PricingRule> rules)
         {
             var quote = new Quote
             {
                 CustomerId = customer.Id,
                 CustomerName = customer.Name,
                 CustomerType = customer.CustomerType,
-                Items = new List<QuoteItem>(),
                 GeneratedAt = DateTime.UtcNow
             };
 
-            decimal subtotal = 0;
-
-            foreach (var (productId, quantity) in productQuantities)
+            // Discount 1: per-unit. Rounded to cents per unit so that unit price x quantity
+            // always equals the stored line total.
+            var unitRule = BestUnitRule(rules);
+            foreach (var (product, quantity) in lines)
             {
-                var product = _context.Products.Find(productId);
-                if (product == null || product.Stock < quantity)
-                {
-                    throw new InvalidOperationException($"Product {productId} not found or insufficient stock");
-                }
-
-                var basePrice = product.BasePrice;
-                var discountedPrice = CalculatePrice(product, customer.CustomerType, quantity);
-                var discountAmount = (basePrice - discountedPrice) * quantity;
-                var lineTotal = discountedPrice * quantity;
-
+                var unitPrice = ApplyUnitDiscount(product.BasePrice, unitRule);
                 quote.Items.Add(new QuoteItem
                 {
-                    ProductId = productId,
+                    ProductId = product.Id,
                     ProductName = product.Name,
                     Quantity = quantity,
-                    BasePrice = basePrice,
-                    DiscountedPrice = discountedPrice,
-                    DiscountAmount = discountAmount,
-                    LineTotal = lineTotal
+                    BasePrice = product.BasePrice,
+                    DiscountedPrice = unitPrice,
+                    DiscountAmount = (product.BasePrice - unitPrice) * quantity,
+                    LineTotal = unitPrice * quantity
                 });
-
-                subtotal += lineTotal;
             }
 
-            quote.Subtotal = subtotal;
+            quote.ListTotal = quote.Items.Sum(i => i.BasePrice * i.Quantity);
+            quote.Subtotal = quote.Items.Sum(i => i.LineTotal);
+            quote.UnitDiscountTotal = quote.ListTotal - quote.Subtotal;
 
-            // Apply any additional pricing rules based on total order amount
-            var orderLevelRule = GetBestPricingRule(customer.CustomerType, subtotal);
-            if (orderLevelRule != null && orderLevelRule.MinimumOrderAmount.HasValue &&
-                subtotal >= orderLevelRule.MinimumOrderAmount.Value)
+            if (unitRule != null && quote.UnitDiscountTotal > 0)
             {
-                // Apply additional discount on total
-                var additionalDiscount = subtotal * (orderLevelRule.DiscountPercentage / 100);
-                quote.AdditionalDiscount = additionalDiscount;
-                quote.Total = subtotal - additionalDiscount;
+                quote.AppliedRules.Add(ToApplied(unitRule, RuleScope.PerUnit, quote.UnitDiscountTotal));
             }
-            else
+
+            // Discount 2: volume, taken off the already-discounted subtotal.
+            var volumeRules = rules.Where(r => r.MinimumOrderAmount.HasValue).ToList();
+            var volumeRule = volumeRules
+                .Where(r => quote.Subtotal >= r.MinimumOrderAmount!.Value)
+                .OrderByDescending(r => r.DiscountPercentage)
+                .FirstOrDefault();
+
+            if (volumeRule != null)
             {
-                quote.Total = subtotal;
+                quote.AdditionalDiscountPercentage = volumeRule.DiscountPercentage;
+                quote.AdditionalDiscount = Round(quote.Subtotal * volumeRule.DiscountPercentage / 100m);
+                quote.AppliedRules.Add(ToApplied(volumeRule, RuleScope.OrderTotal, quote.AdditionalDiscount));
+            }
+
+            quote.Total = quote.Subtotal - quote.AdditionalDiscount;
+            quote.TotalSavings = quote.ListTotal - quote.Total;
+
+            // Nudge: the cheapest tier above the current subtotal that would give a bigger discount.
+            var currentPct = quote.AdditionalDiscountPercentage;
+            var next = volumeRules
+                .Where(r => quote.Subtotal < r.MinimumOrderAmount!.Value && r.DiscountPercentage > currentPct)
+                .OrderBy(r => r.MinimumOrderAmount)
+                .FirstOrDefault();
+            if (next != null)
+            {
+                quote.NextTier = new NextTier
+                {
+                    Description = next.Description,
+                    DiscountPercentage = next.DiscountPercentage,
+                    MinimumOrderAmount = next.MinimumOrderAmount!.Value,
+                    AmountToUnlock = next.MinimumOrderAmount.Value - quote.Subtotal
+                };
             }
 
             return quote;
         }
 
         /// <summary>
-        /// Gets the best pricing rule for a customer type and order amount.
-        /// Returns the rule with the highest discount percentage that applies.
+        /// Merges duplicate product lines (summing quantities, in product-id order so stock
+        /// updates always lock rows in the same order) and rejects non-positive quantities.
         /// </summary>
-        /// <param name="customerType">The customer type to find rules for</param>
-        /// <param name="orderAmount">The total order amount (for minimum order requirements)</param>
-        /// <returns>The best applicable pricing rule, or null if none found</returns>
-        private PricingRule? GetBestPricingRule(CustomerType customerType, decimal orderAmount)
+        public static List<OrderLine> MergeLines(IEnumerable<OrderLine> requested)
         {
-            var applicableRules = _context.PricingRules
-                .Where(r => r.CustomerType == customerType &&
-                           r.IsActive &&
-                           (!r.MinimumOrderAmount.HasValue || orderAmount >= r.MinimumOrderAmount.Value))
-                .OrderByDescending(r => r.DiscountPercentage)
+            var merged = new SortedDictionary<int, long>();
+            foreach (var line in requested)
+            {
+                if (line.Quantity <= 0)
+                {
+                    throw new OrderValidationException($"Quantity for product {line.ProductId} must be greater than zero.");
+                }
+
+                merged[line.ProductId] = merged.GetValueOrDefault(line.ProductId) + line.Quantity;
+            }
+
+            if (merged.Count == 0)
+            {
+                throw new OrderValidationException("At least one product is required.");
+            }
+
+            return merged
+                .Select(kv => new OrderLine(kv.Key, (int)Math.Min(kv.Value, int.MaxValue)))
                 .ToList();
-
-            return applicableRules.FirstOrDefault();
         }
 
-        /// <summary>
-        /// Validates if an order can be placed based on stock availability
-        /// </summary>
-        /// <param name="productQuantities">Dictionary of product IDs and requested quantities</param>
-        /// <returns>True if all products have sufficient stock</returns>
-        public bool ValidateStockAvailability(Dictionary<int, int> productQuantities)
+        private static PricingRule? BestUnitRule(IReadOnlyList<PricingRule> rules) =>
+            rules.Where(r => !r.MinimumOrderAmount.HasValue)
+                 .OrderByDescending(r => r.DiscountPercentage)
+                 .FirstOrDefault();
+
+        private static decimal ApplyUnitDiscount(decimal basePrice, PricingRule? rule) =>
+            rule == null ? basePrice : Round(basePrice * rule.DiscountFactor);
+
+        private static decimal Round(decimal value) =>
+            Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+        private static AppliedRule ToApplied(PricingRule rule, RuleScope scope, decimal saved) => new()
         {
-            foreach (var (productId, quantity) in productQuantities)
-            {
-                var product = _context.Products.Find(productId);
-                if (product == null || product.Stock < quantity)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        /// <summary>
-        /// Reduces stock levels for products in an order
-        /// </summary>
-        /// <param name="productQuantities">Dictionary of product IDs and quantities to reduce</param>
-        public void ReduceStock(Dictionary<int, int> productQuantities)
-        {
-            foreach (var (productId, quantity) in productQuantities)
-            {
-                var product = _context.Products.Find(productId);
-                if (product != null)
-                {
-                    product.Stock -= quantity;
-                }
-            }
-            _context.SaveChanges();
-        }
-    }
-
-    /// <summary>
-    /// Represents a quote for a customer with detailed pricing breakdown
-    /// </summary>
-    public class Quote
-    {
-        /// <summary>
-        /// Customer ID this quote is for
-        /// </summary>
-        public int CustomerId { get; set; }
-
-        /// <summary>
-        /// Customer name
-        /// </summary>
-        public string CustomerName { get; set; } = string.Empty;
-
-        /// <summary>
-        /// Customer type (affects pricing)
-        /// </summary>
-        public CustomerType CustomerType { get; set; }
-
-        /// <summary>
-        /// When this quote was generated
-        /// </summary>
-        public DateTime GeneratedAt { get; set; }
-
-        /// <summary>
-        /// Individual quote items with pricing details
-        /// </summary>
-        public List<QuoteItem> Items { get; set; } = new List<QuoteItem>();
-
-        /// <summary>
-        /// Subtotal before additional discounts
-        /// </summary>
-        public decimal Subtotal { get; set; }
-
-        /// <summary>
-        /// Additional discount applied to the order total
-        /// </summary>
-        public decimal AdditionalDiscount { get; set; }
-
-        /// <summary>
-        /// Final total after all discounts
-        /// </summary>
-        public decimal Total { get; set; }
-    }
-
-    /// <summary>
-    /// Represents an individual item in a quote with pricing details
-    /// </summary>
-    public class QuoteItem
-    {
-        /// <summary>
-        /// Product ID
-        /// </summary>
-        public int ProductId { get; set; }
-
-        /// <summary>
-        /// Product name
-        /// </summary>
-        public string ProductName { get; set; } = string.Empty;
-
-        /// <summary>
-        /// Quantity requested
-        /// </summary>
-        public int Quantity { get; set; }
-
-        /// <summary>
-        /// Base price per unit before discounts
-        /// </summary>
-        public decimal BasePrice { get; set; }
-
-        /// <summary>
-        /// Price per unit after applying customer discounts
-        /// </summary>
-        public decimal DiscountedPrice { get; set; }
-
-        /// <summary>
-        /// Total discount amount for this line item
-        /// </summary>
-        public decimal DiscountAmount { get; set; }
-
-        /// <summary>
-        /// Total price for this line item (DiscountedPrice * Quantity)
-        /// </summary>
-        public decimal LineTotal { get; set; }
+            RuleId = rule.Id,
+            Description = rule.Description,
+            DiscountPercentage = rule.DiscountPercentage,
+            Scope = scope,
+            AmountSaved = saved
+        };
     }
 }

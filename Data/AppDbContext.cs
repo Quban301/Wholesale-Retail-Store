@@ -72,6 +72,8 @@ namespace WholesaleRetailStore.Data
                 entity.HasKey(o => o.Id);
                 entity.Property(o => o.CreatedAt).IsRequired().HasDefaultValueSql("GETUTCDATE()");
                 entity.Property(o => o.TotalAmount).IsRequired().HasColumnType("decimal(18,2)");
+                entity.Property(o => o.DiscountAmount).IsRequired().HasColumnType("decimal(18,2)").HasDefaultValue(0m);
+                entity.Property(o => o.DiscountDescription).HasMaxLength(200);
                 entity.Property(o => o.Status).IsRequired();
 
                 // Relationships
@@ -227,7 +229,7 @@ namespace WholesaleRetailStore.Data
                     DiscountPercentage = 15.0m,
                     MinimumOrderAmount = 500.0m,
                     IsActive = true,
-                    Description = "Volume discount - 15% off for orders over $500"
+                    Description = "Volume discount - 15% off for orders over R500"
                 }
             );
         }

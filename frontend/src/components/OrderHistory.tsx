@@ -1,228 +1,217 @@
-import { useState, useEffect } from 'react';
-import { Package, Calendar, User } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Calendar, ChevronDown, Package, User } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import type { Order } from '../types';
 import { OrderStatus } from '../types';
-import { ApiService, PricingUtils } from '../services/api';
+import { ApiService, ORDER_STATUS_LABELS, PricingUtils, errorMessage } from '../services/api';
 
 interface OrderHistoryProps {
-  onOrderCountChange?: () => void;
+  onOrdersLoaded: (count: number) => void;
 }
 
-const OrderHistory: React.FC<OrderHistoryProps> = ({ onOrderCountChange }) => {
+const money = PricingUtils.formatCurrency;
+
+const STATUS_BADGE: Record<OrderStatus, string> = {
+  [OrderStatus.Pending]: 'bg-wheat text-bark',
+  [OrderStatus.Confirmed]: 'bg-mist text-bark',
+  [OrderStatus.Shipped]: 'bg-moss text-cream',
+  [OrderStatus.Cancelled]: 'bg-bark/10 text-bark',
+};
+
+const OrderHistory: React.FC<OrderHistoryProps> = ({ onOrdersLoaded }) => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [customerFilter, setCustomerFilter] = useState<number | 'all'>('all');
+  const [statusError, setStatusError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadOrders();
-  }, []);
-
-  const loadOrders = async () => {
+  const loadOrders = useCallback(async () => {
     try {
-      const orderData = await ApiService.getOrders();
-      setOrders(orderData);
-      // Notify parent component about order count change
-      if (onOrderCountChange) {
-        onOrderCountChange();
-      }
-    } catch (error) {
-      console.error('Failed to load orders:', error);
+      const data = await ApiService.getOrders();
+      setOrders(data);
+      setError(null);
+      onOrdersLoaded(data.length);
+    } catch (err) {
+      setError(errorMessage(err, 'Could not load orders.'));
     } finally {
       setLoading(false);
     }
-  };
+  }, [onOrdersLoaded]);
 
-  const getStatusColor = (status: OrderStatus): string => {
-    switch (status) {
-      case OrderStatus.Pending:
-        return 'bg-yellow-100 text-yellow-800';
-      case OrderStatus.Confirmed:
-        return 'bg-blue-100 text-blue-800';
-      case OrderStatus.Shipped:
-        return 'bg-green-100 text-green-800';
-      case OrderStatus.Cancelled:
-        return 'bg-red-100 text-red-800';
-      default:
-        return 'bg-gray-100 text-gray-800';
-    }
-  };
+  useEffect(() => {
+    loadOrders();
+  }, [loadOrders]);
 
-  const getStatusLabel = (status: OrderStatus): string => {
-    switch (status) {
-      case OrderStatus.Pending:
-        return 'Pending';
-      case OrderStatus.Confirmed:
-        return 'Confirmed';
-      case OrderStatus.Shipped:
-        return 'Shipped';
-      case OrderStatus.Cancelled:
-        return 'Cancelled';
-      default:
-        return 'Unknown';
+  const customers = useMemo(() => {
+    const seen = new Map<number, string>();
+    orders.forEach(o => seen.set(o.customerId, o.customerName));
+    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [orders]);
+
+  const shown = orders.filter(o => customerFilter === 'all' || o.customerId === customerFilter);
+  const selected = orders.find(o => o.id === selectedId) ?? null;
+
+  const changeStatus = async (order: Order, status: OrderStatus) => {
+    setStatusError(null);
+    try {
+      await ApiService.updateOrderStatus(order.id, status);
+      setOrders(prev => prev.map(o => (o.id === order.id ? { ...o, status } : o)));
+    } catch (err) {
+      setStatusError(errorMessage(err, 'Could not update the status.'));
     }
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        <span className="ml-2 text-gray-600">Loading orders...</span>
+      <div className="flex items-center justify-center gap-3 py-12" role="status">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-mist border-t-moss" />
+        <span className="text-moss">Loading orders...</span>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-3xl font-bold text-gray-900">Order History</h2>
-          <p className="text-gray-600 mt-1">
-            {orders.length} order{orders.length !== 1 ? 's' : ''} found
+          <h2 className="text-3xl font-bold">Order history</h2>
+          <p className="mt-1 text-moss">
+            {shown.length} order{shown.length !== 1 ? 's' : ''}
           </p>
         </div>
 
-        {orders.length > 0 && (
-          <button
-            onClick={loadOrders}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-          >
-            <Package className="h-4 w-4" />
-            <span>Refresh</span>
-          </button>
+        {customers.length > 1 && (
+          <div className="relative">
+            <label htmlFor="order-customer" className="sr-only">Filter by customer</label>
+            <select
+              id="order-customer"
+              value={customerFilter}
+              onChange={e => setCustomerFilter(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+              className="field appearance-none pr-9"
+            >
+              <option value="all">All customers</option>
+              {customers.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-moss" aria-hidden />
+          </div>
         )}
       </div>
 
-      {orders.length === 0 ? (
-        <div className="text-center py-12">
-          <Package className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-xl font-medium text-gray-900 mb-2">No orders found</h3>
-          <p className="text-gray-600 mb-6">
-            When you place orders, they will appear here.
-          </p>
-          <button
-            onClick={() => window.location.reload()} // This would ideally navigate to products
-            className="bg-blue-600 text-white px-6 py-3 rounded-md hover:bg-blue-700 transition-colors"
-          >
-            Browse Products
-          </button>
+      {error && <p role="alert" className="rounded-lg bg-wheat px-4 py-3 text-sm">{error}</p>}
+
+      {shown.length === 0 ? (
+        <div className="py-12 text-center">
+          <Package className="mx-auto mb-4 h-16 w-16 text-sage" aria-hidden />
+          <h3 className="mb-2 text-xl font-medium">No orders yet</h3>
+          <p className="mb-6 text-moss">Orders you place will appear here.</p>
+          <Link to="/" className="btn btn-primary">Browse products</Link>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Orders List */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-gray-900">Recent Orders</h3>
-            {orders.map((order) => (
-              <div
-                key={order.id}
-                className={`border rounded-lg p-4 cursor-pointer transition-colors ${
-                  selectedOrder?.id === order.id
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300'
-                }`}
-                onClick={() => setSelectedOrder(order)}
-              >
-                <div className="flex justify-between items-start mb-3">
-                  <div>
-                    <h4 className="font-semibold text-gray-900">
-                      Order #{order.id}
-                    </h4>
-                    <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
-                      <div className="flex items-center space-x-1">
-                        <User className="h-4 w-4" />
-                        <span>{order.customerName}</span>
-                      </div>
-                      <div className="flex items-center space-x-1">
-                        <Calendar className="h-4 w-4" />
-                        <span>{new Date(order.createdAt).toLocaleDateString()}</span>
+        <div className="grid gap-6 lg:grid-cols-2">
+          <ul className="space-y-3">
+            {shown.map(order => (
+              <li key={order.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(order.id)}
+                  aria-pressed={selected?.id === order.id}
+                  className={`card w-full p-4 text-left transition-colors ${
+                    selected?.id === order.id ? 'border-moss bg-mist/50' : 'hover:border-sage'
+                  }`}
+                >
+                  <div className="mb-3 flex items-start justify-between">
+                    <div>
+                      <h3 className="font-semibold">Order #{order.id}</h3>
+                      <div className="mt-1 flex items-center gap-4 text-sm text-moss">
+                        <span className="flex items-center gap-1"><User className="h-4 w-4" aria-hidden />{order.customerName}</span>
+                        <span className="flex items-center gap-1"><Calendar className="h-4 w-4" aria-hidden />{new Date(order.createdAt).toLocaleDateString()}</span>
                       </div>
                     </div>
+                    <span className={`badge ${STATUS_BADGE[order.status]}`}>{ORDER_STATUS_LABELS[order.status]}</span>
                   </div>
-                  <div className="text-right">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(order.status)}`}>
-                      {getStatusLabel(order.status)}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-moss">
+                      {order.items.length} item{order.items.length !== 1 ? 's' : ''}
                     </span>
+                    <span className="font-semibold">{money(order.totalAmount)}</span>
                   </div>
-                </div>
-
-                <div className="flex justify-between items-center">
-                  <div className="text-sm text-gray-600">
-                    {order.items.length} item{order.items.length !== 1 ? 's' : ''}
-                  </div>
-                  <div className="font-semibold text-gray-900">
-                    {PricingUtils.formatCurrency(order.totalAmount)}
-                  </div>
-                </div>
-              </div>
+                </button>
+              </li>
             ))}
-          </div>
+          </ul>
 
-          {/* Order Details */}
           <div>
-            {selectedOrder ? (
-              <div className="bg-white border rounded-lg p-6">
-                <h3 className="text-xl font-semibold text-gray-900 mb-4">
-                  Order #{selectedOrder.id} Details
-                </h3>
+            {selected ? (
+              <section className="card p-6" aria-label={`Order ${selected.id} details`}>
+                <h3 className="mb-4 text-xl font-semibold">Order #{selected.id}</h3>
 
-                <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="mb-6 grid grid-cols-2 gap-4 text-sm">
                   <div>
-                    <h4 className="font-medium text-gray-900 mb-2">Customer Information</h4>
-                    <div className="space-y-1 text-sm">
-                      <p><strong>Name:</strong> {selectedOrder.customerName}</p>
-                      <p><strong>Type:</strong> {PricingUtils.getCustomerTypeLabel(selectedOrder.customerType)}</p>
-                    </div>
-                  </div>
-
-                  <div>
-                    <h4 className="font-medium text-gray-900 mb-2">Order Information</h4>
-                    <div className="space-y-1 text-sm">
-                      <p><strong>Date:</strong> {new Date(selectedOrder.createdAt).toLocaleString()}</p>
-                      <p>
-                        <strong>Status:</strong>
-                        <span className={`ml-1 px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(selectedOrder.status)}`}>
-                          {getStatusLabel(selectedOrder.status)}
-                        </span>
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <h4 className="font-medium text-gray-900 mb-3">Order Items</h4>
-                <div className="space-y-3">
-                  {selectedOrder.items.map((item) => (
-                    <div key={item.productId} className="flex justify-between items-center py-2 border-b border-gray-100">
-                      <div className="flex-1">
-                        <h5 className="font-medium text-gray-900">{item.productName}</h5>
-                        <p className="text-sm text-gray-600">
-                          Quantity: {item.quantity} × {PricingUtils.formatCurrency(item.unitPrice)}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-semibold text-gray-900">
-                          {PricingUtils.formatCurrency(item.totalPrice)}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="mt-6 pt-4 border-t border-gray-200">
-                  <div className="flex justify-between items-center">
-                    <span className="text-lg font-medium text-gray-900">Total Amount</span>
-                    <span className="text-2xl font-bold text-blue-600">
-                      {PricingUtils.formatCurrency(selectedOrder.totalAmount)}
+                    <h4 className="mb-1 font-medium">Customer</h4>
+                    <p>{selected.customerName}</p>
+                    <span className={`badge mt-1 ${PricingUtils.getCustomerTypeBadge(selected.customerType)}`}>
+                      {PricingUtils.getCustomerTypeLabel(selected.customerType)}
                     </span>
                   </div>
+                  <div>
+                    <h4 className="mb-1 font-medium">Placed</h4>
+                    <p>{new Date(selected.createdAt).toLocaleString()}</p>
+                    <div className="mt-1">
+                      <label htmlFor="status" className="sr-only">Order status</label>
+                      <select
+                        id="status"
+                        value={selected.status}
+                        onChange={e => changeStatus(selected, Number(e.target.value) as OrderStatus)}
+                        className="field py-1 text-sm"
+                      >
+                        {Object.values(OrderStatus).map(s => (
+                          <option key={s} value={s}>{ORDER_STATUS_LABELS[s]}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
                 </div>
-              </div>
+
+                {statusError && <p role="alert" className="mb-4 rounded-lg bg-wheat px-3 py-2 text-sm">{statusError}</p>}
+
+                <h4 className="mb-2 font-medium">Items</h4>
+                <ul className="divide-y divide-mist">
+                  {selected.items.map(item => (
+                    <li key={item.productId} className="flex justify-between py-2">
+                      <div>
+                        <p className="font-medium">{item.productName}</p>
+                        <p className="text-sm text-moss">{item.quantity} &times; {money(item.unitPrice)}</p>
+                      </div>
+                      <p className="font-semibold">{money(item.totalPrice)}</p>
+                    </li>
+                  ))}
+                </ul>
+
+                <dl className="mt-4 space-y-1 border-t border-mist pt-4 text-sm">
+                  <div className="flex justify-between">
+                    <dt>Subtotal</dt>
+                    <dd>{money(selected.subtotal)}</dd>
+                  </div>
+                  {selected.discountAmount > 0 && (
+                    <div className="flex justify-between font-medium text-moss">
+                      <dt>{selected.discountDescription ?? 'Order discount'}</dt>
+                      <dd>-{money(selected.discountAmount)}</dd>
+                    </div>
+                  )}
+                  <div className="flex justify-between pt-1 text-lg font-bold">
+                    <dt>Total</dt>
+                    <dd>{money(selected.totalAmount)}</dd>
+                  </div>
+                </dl>
+              </section>
             ) : (
-              <div className="bg-gray-50 border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                <Package className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-                <h3 className="text-lg font-medium text-gray-900 mb-2">Select an Order</h3>
-                <p className="text-gray-600">
-                  Click on any order from the list to view its details.
-                </p>
+              <div className="rounded-xl border-2 border-dashed border-sage p-8 text-center">
+                <Package className="mx-auto mb-3 h-12 w-12 text-sage" aria-hidden />
+                <h3 className="mb-1 text-lg font-medium">Select an order</h3>
+                <p className="text-moss">Pick an order from the list to see its breakdown.</p>
               </div>
             )}
           </div>

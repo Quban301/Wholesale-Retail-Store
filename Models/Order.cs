@@ -5,7 +5,7 @@ namespace WholesaleRetailStore.Models
 {
     /// <summary>
     /// Represents an order placed by a customer.
-    /// Contains order items and calculates total amount automatically.
+    /// The invariant is: sum(OrderItems.Quantity * UnitPrice) - DiscountAmount = TotalAmount.
     /// </summary>
     public class Order
     {
@@ -33,11 +33,26 @@ namespace WholesaleRetailStore.Models
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
         /// <summary>
-        /// Total amount of the order (calculated from order items)
+        /// Amount the customer pays, after the per-unit discounts (already in
+        /// <see cref="OrderItem.UnitPrice"/>) and the order-level <see cref="DiscountAmount"/>.
         /// </summary>
         [Required]
         [Column(TypeName = "decimal(18,2)")]
         public decimal TotalAmount { get; set; }
+
+        /// <summary>
+        /// Order-level (volume) discount taken off the sum of the line totals.
+        /// Stored separately so the order can always be reconciled from its items.
+        /// </summary>
+        [Column(TypeName = "decimal(18,2)")]
+        public decimal DiscountAmount { get; set; }
+
+        /// <summary>
+        /// Human-readable description of the order-level rule that produced
+        /// <see cref="DiscountAmount"/>, or null if none applied.
+        /// </summary>
+        [StringLength(200)]
+        public string? DiscountDescription { get; set; }
 
         /// <summary>
         /// Status of the order

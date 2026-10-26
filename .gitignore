@@ -1,0 +1,14 @@
+# Build output
+bin/
+obj/
+*.user
+.vs/
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+
+# Local settings / logs
+*.log
+appsettings.Local.json

@@ -1,60 +1,57 @@
-using Microsoft.AspNetCore.SpaServices.ReactDevelopmentServer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.OpenApi.Models;
+using Microsoft.Extensions.FileProviders;
 using WholesaleRetailStore.Data;
-using Microsoft.AspNetCore.Cors;
+using WholesaleRetailStore.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllersWithViews();
+builder.Services.AddControllers();
+
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"),
-        sqlServerOptionsAction: sqlOptions =>
-        {
-            sqlOptions.EnableRetryOnFailure(
-                maxRetryCount: 5,
-                maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
-        }));
+        sqlOptions => sqlOptions.EnableRetryOnFailure(maxRetryCount: 5, maxRetryDelay: TimeSpan.FromSeconds(30), errorNumbersToAdd: null)));
 
-// Register business services
-builder.Services.AddScoped<WholesaleRetailStore.Services.PricingService>();
-builder.Services.AddScoped<WholesaleRetailStore.Services.IntelligentSearchService>();
+builder.Services.AddScoped<PricingService>();
+builder.Services.AddScoped<OrderService>();
+builder.Services.AddSingleton<ProductSearchService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Add CORS services
-builder.Services.AddCors();
-
-// Add SPA services
-builder.Services.AddSpaStaticFiles(configuration =>
-{
-    configuration.RootPath = "frontend/build";
-});
+// The built React app is served by this same server, so no CORS is needed.
+// (During `npm run dev` the Vite proxy forwards /api, which is also same-origin.)
+builder.Services.AddSpaStaticFiles(configuration => configuration.RootPath = "frontend/build");
 
 var app = builder.Build();
+
+// Never leak exception text to API callers; the exception is still logged by the middleware.
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+    await context.Response.WriteAsJsonAsync(new { message = "An unexpected error occurred." });
+}));
 
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+
+    // Create/upgrade the LocalDB database (and seed data) on startup so `dotnet run` just works.
+    using var scope = app.Services.CreateScope();
+    scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.Migrate();
 }
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();
-
-// Serve React app with no-cache headers for development
 app.UseSpaStaticFiles();
 
-// Add no-cache headers for HTML files to prevent caching issues
+// Don't let the browser cache the SPA shell, so a rebuilt frontend is picked up immediately.
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.Value.EndsWith(".html") || context.Request.Path.Value == "/")
+    var path = context.Request.Path.Value;
+    if (path == "/" || (path?.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ?? false))
     {
-        context.Response.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate");
-        context.Response.Headers.Add("Pragma", "no-cache");
-        context.Response.Headers.Add("Expires", "0");
+        context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
     }
     await next();
 });
@@ -62,18 +59,18 @@ app.Use(async (context, next) =>
 app.UseRouting();
 app.UseAuthorization();
 
-// Configure CORS
-app.UseCors(options => 
-{
-    options.AllowAnyOrigin()
-           .AllowAnyMethod()
-           .AllowAnyHeader();
-});
-
-// Map API routes only
 app.MapControllers();
 
-// Serve React app for all non-API routes
-app.MapFallbackToFile("index.html");
+// Anything that isn't an API route is a client-side React route, so serve the SPA shell.
+// The shell lives in the Vite output folder, not wwwroot, so point the fallback there.
+var spaRoot = Path.Combine(app.Environment.ContentRootPath, "frontend", "build");
+if (Directory.Exists(spaRoot))
+{
+    app.MapFallbackToFile("index.html", new StaticFileOptions { FileProvider = new PhysicalFileProvider(spaRoot) });
+}
+else
+{
+    app.Logger.LogWarning("frontend/build not found. Run `npm install && npm run build` in ./frontend to serve the UI.");
+}
 
 app.Run();

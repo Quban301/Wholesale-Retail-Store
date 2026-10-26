@@ -1,162 +1,151 @@
 import { useState } from 'react';
-import { Plus, ChevronDown } from 'lucide-react';
+import { ChevronDown, Plus } from 'lucide-react';
 import type { Customer } from '../types';
 import { CustomerType } from '../types';
-import { ApiService, PricingUtils } from '../services/api';
+import { ApiService, PricingUtils, errorMessage } from '../services/api';
 
 interface CustomerSelectorProps {
   customers: Customer[];
   selectedCustomerId: number | null;
   onCustomerSelect: (customer: Customer) => void;
-  onCreateCustomer: () => void;
+  onCustomerCreated: () => void;
 }
+
+const BLANK = { name: '', email: '', customerType: CustomerType.Retail as CustomerType };
 
 const CustomerSelector: React.FC<CustomerSelectorProps> = ({
   customers,
   selectedCustomerId,
   onCustomerSelect,
-  onCreateCustomer,
+  onCustomerCreated,
 }) => {
-  const [showCreateForm, setShowCreateForm] = useState(false);
-  const [newCustomer, setNewCustomer] = useState({
-    name: '',
-    email: '',
-    customerType: 0,
-  });
-  const [isCreating, setIsCreating] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(BLANK);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleCreateCustomer = async (e: React.FormEvent) => {
+  const selected = customers.find(c => c.id === selectedCustomerId);
+
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newCustomer.name || !newCustomer.email) return;
-
-    setIsCreating(true);
+    setCreating(true);
+    setError(null);
     try {
-      const createdCustomer = await ApiService.createCustomer({
-        name: newCustomer.name,
-        email: newCustomer.email,
-        customerType: newCustomer.customerType as CustomerType,
-      });
-      
-      onCustomerSelect(createdCustomer);
-      setNewCustomer({ name: '', email: '', customerType: 0 });
-      setShowCreateForm(false);
-      onCreateCustomer(); // Refresh the customer list
-    } catch (error) {
-      console.error('Failed to create customer:', error);
-      alert('Failed to create customer. Please try again.');
+      const created = await ApiService.createCustomer(form);
+      onCustomerCreated();
+      onCustomerSelect(created);
+      setForm(BLANK);
+      setShowForm(false);
+    } catch (err) {
+      setError(errorMessage(err, 'Could not create the customer.'));
     } finally {
-      setIsCreating(false);
+      setCreating(false);
     }
   };
 
   return (
     <div className="space-y-4">
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">
-          Select Customer
+        <label htmlFor="customer" className="mb-1 block text-sm font-medium">
+          Shopping as
         </label>
-        
-        <div className="flex space-x-3">
-          {/* Customer Dropdown */}
-          <div className="flex-1 relative">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="relative flex-1">
             <select
-              value={selectedCustomerId || ''}
-              onChange={(e) => {
-                const customerId = parseInt(e.target.value);
-                const customer = customers.find(c => c.id === customerId);
-                if (customer) {
-                  onCustomerSelect(customer);
-                }
+              id="customer"
+              value={selectedCustomerId ?? ''}
+              onChange={e => {
+                const customer = customers.find(c => c.id === Number(e.target.value));
+                if (customer) onCustomerSelect(customer);
               }}
-              className="w-full px-4 py-3 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white"
+              className="field appearance-none pr-10"
             >
               <option value="">Choose a customer...</option>
-              {customers.map((customer) => (
-                <option key={customer.id} value={customer.id}>
-                  {customer.name} ({PricingUtils.getCustomerTypeLabel(customer.customerType)})
+              {customers.map(c => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({PricingUtils.getCustomerTypeLabel(c.customerType)})
                 </option>
               ))}
             </select>
-            <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400 pointer-events-none" />
+            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-5 w-5 -translate-y-1/2 text-moss" aria-hidden />
           </div>
 
-          {/* New Customer Button */}
-          <button
-            onClick={() => setShowCreateForm(!showCreateForm)}
-            className="flex items-center space-x-2 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors whitespace-nowrap"
-          >
-            <Plus className="h-4 w-4" />
-            <span>New Customer</span>
+          <button type="button" onClick={() => setShowForm(v => !v)} className="btn btn-primary whitespace-nowrap">
+            <Plus className="h-4 w-4" aria-hidden />
+            New customer
           </button>
         </div>
+
+        {selected && (
+          <p className="mt-2 text-sm text-moss">
+            <span className={`badge mr-2 ${PricingUtils.getCustomerTypeBadge(selected.customerType)}`}>
+              {PricingUtils.getCustomerTypeLabel(selected.customerType)}
+            </span>
+            {selected.customerType === CustomerType.Wholesale
+              ? 'Wholesale discounts are applied automatically.'
+              : 'Retail customers pay the listed price.'}
+          </p>
+        )}
       </div>
 
-      {/* Create Customer Form */}
-      {showCreateForm && (
-        <div className="p-4 border border-gray-200 rounded-lg bg-gray-50">
-          <form onSubmit={handleCreateCustomer} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={newCustomer.name}
-                  onChange={(e) => setNewCustomer(prev => ({ ...prev, name: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Customer name"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  value={newCustomer.email}
-                  onChange={(e) => setNewCustomer(prev => ({ ...prev, email: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="customer@example.com"
-                  required
-                />
-              </div>
-            </div>
-
+      {showForm && (
+        <form onSubmit={handleCreate} className="space-y-4 rounded-lg border border-mist bg-mist/30 p-4">
+          <div className="grid gap-4 md:grid-cols-2">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Customer Type
-              </label>
-              <select
-                value={newCustomer.customerType}
-                onChange={(e) => setNewCustomer(prev => ({ ...prev, customerType: parseInt(e.target.value) }))}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              >
-                <option value={0}>Retail</option>
-                <option value={1}>Wholesale</option>
-              </select>
+              <label htmlFor="new-name" className="mb-1 block text-sm font-medium">Name</label>
+              <input
+                id="new-name"
+                className="field"
+                value={form.name}
+                maxLength={100}
+                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                placeholder="Customer name"
+                required
+              />
             </div>
+            <div>
+              <label htmlFor="new-email" className="mb-1 block text-sm font-medium">Email</label>
+              <input
+                id="new-email"
+                type="email"
+                className="field"
+                value={form.email}
+                maxLength={255}
+                onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                placeholder="customer@example.com"
+                required
+              />
+            </div>
+          </div>
 
-            <div className="flex space-x-2">
-              <button
-                type="submit"
-                disabled={isCreating}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {isCreating ? 'Creating...' : 'Create Customer'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCreateForm(false)}
-                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
+          <div>
+            <label htmlFor="new-type" className="mb-1 block text-sm font-medium">Customer type</label>
+            <select
+              id="new-type"
+              className="field"
+              value={form.customerType}
+              onChange={e => setForm(f => ({ ...f, customerType: Number(e.target.value) as CustomerType }))}
+            >
+              <option value={CustomerType.Retail}>Retail</option>
+              <option value={CustomerType.Wholesale}>Wholesale</option>
+            </select>
+          </div>
+
+          {error && (
+            <p role="alert" className="rounded-lg bg-wheat px-3 py-2 text-sm">
+              {error}
+            </p>
+          )}
+
+          <div className="flex gap-2">
+            <button type="submit" disabled={creating} className="btn btn-primary flex-1">
+              {creating ? 'Creating...' : 'Create customer'}
+            </button>
+            <button type="button" onClick={() => setShowForm(false)} className="btn btn-secondary">
+              Cancel
+            </button>
+          </div>
+        </form>
       )}
     </div>
   );
